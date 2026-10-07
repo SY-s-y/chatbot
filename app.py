@@ -15,6 +15,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from openai import APIConnectionError, AuthenticationError, RateLimitError
 from pypdf import PdfReader
 
 
@@ -75,6 +76,20 @@ def save_chat_history(messages: list[dict]) -> None:
     HISTORY_FILE.write_text(
         json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+def get_openai_api_key() -> str | None:
+    """Cloud Secrets를 우선 사용하고, 로컬에서는 .env 값을 사용합니다."""
+    load_dotenv(PROJECT_DIR / ".env")
+
+    try:
+        # Streamlit Cloud의 Secrets에 등록한 키는 이 방식으로 읽습니다.
+        cloud_key = st.secrets.get("OPENAI_API_KEY")
+    except FileNotFoundError:
+        # 로컬에 .streamlit/secrets.toml이 없어도 .env 방식은 계속 동작합니다.
+        cloud_key = None
+
+    return cloud_key or os.environ.get("OPENAI_API_KEY")
 
 
 @st.cache_resource(show_spinner="PDF 문서를 읽고 검색 인덱스를 만드는 중입니다...")
@@ -148,8 +163,7 @@ def answer_question(vector_store: InMemoryVectorStore, question: str, api_key: s
 
 def main() -> None:
     """Streamlit 화면을 구성합니다."""
-    load_dotenv(PROJECT_DIR / ".env")
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = get_openai_api_key()
 
     st.set_page_config(page_title="공무원 여비 RAG 챗봇", page_icon="📚")
     st.title("📚 공무원 여비 RAG 챗봇")
@@ -178,6 +192,25 @@ def main() -> None:
 
     try:
         vector_store, page_count = build_vector_store(document_fingerprint(DATA_DIR), api_key)
+    except AuthenticationError:
+        st.error(
+            "OpenAI API 키를 인증하지 못했습니다. Streamlit Cloud Secrets의 "
+            "OPENAI_API_KEY 값이 올바른지 확인해 주세요."
+        )
+        st.stop()
+    except RateLimitError as error:
+        if "credit_balance_exhausted" in str(error) or "insufficient_quota" in str(error):
+            st.error(
+                "OpenAI API 사용 가능 잔액 또는 프로젝트 예산이 없습니다. "
+                "Secrets의 API 키는 정상적으로 읽혔습니다. OpenAI Platform의 Billing에서 "
+                "크레딧과 프로젝트 예산을 확인한 뒤 다시 시도해 주세요."
+            )
+        else:
+            st.error("OpenAI API 요청 한도에 도달했습니다. 잠시 후 다시 시도해 주세요.")
+        st.stop()
+    except APIConnectionError:
+        st.error("OpenAI API에 연결하지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.")
+        st.stop()
     except Exception as error:
         st.error(f"문서 인덱스를 만드는 중 오류가 발생했습니다: {error}")
         st.stop()
